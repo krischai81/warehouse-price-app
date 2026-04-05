@@ -12,16 +12,29 @@ app.use(express.json());
 
 // ── Config ────────────────────────────────────────────────────────────────
 const APIFY_TOKEN = process.env.APIFY_TOKEN;
-const COSTCO_WAREHOUSE = process.env.COSTCO_WAREHOUSE_ID || "1450"; // Melbourne FL
-const SAMS_CLUB_ID = process.env.SAMS_CLUB_ID || "8141"; // Melbourne FL
+const COSTCO_WAREHOUSE = process.env.COSTCO_WAREHOUSE_ID || "1450";
+const SAMS_CLUB_ID = process.env.SAMS_CLUB_ID || "8141";
 
 const APIFY_BASE = "https://api.apify.com/v2";
 const SAMS_ACTOR = "easyapi~sam-s-club-product-scraper";
 const COSTCO_ACTOR = "parseforge~costco-scraper";
 
-// ── Costco: hit their own internal search API first (free, no key needed) ─
-// This is what costco.com itself calls. whloc={warehouse}-wh returns true
-// floor prices for that warehouse — not the marked-up online prices.
+// ── Safe JSON fetch — never throws on HTML responses ─────────────────────
+async function safeJsonFetch(url, options = {}) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(15000), ...options });
+  const contentType = res.headers.get("content-type") ?? "";
+
+  // If we got HTML back (e.g. Akamai block page), don't try to parse it
+  if (!contentType.includes("json")) {
+    throw new Error(`Non-JSON response (${res.status}): ${contentType}`);
+  }
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+// ── Costco: internal search API (free, no key, warehouse-specific prices) ─
 async function searchCostco(item) {
   const params = new URLSearchParams({
     q: item,
@@ -33,75 +46,71 @@ async function searchCostco(item) {
   });
 
   try {
-    const res = await fetch(
+    const body = await safeJsonFetch(
       `https://www.costco.com/SearchClearanceSavings?${params}`,
       {
-        signal: AbortSignal.timeout(12000),
         headers: {
           "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
           "Accept": "application/json, text/plain, */*",
           "Accept-Language": "en-US,en;q=0.9",
           "Referer": "https://www.costco.com/",
-          "Origin": "https://www.costco.com",
         },
       }
     );
 
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const body = await res.json();
     const docs = body?.response?.docs ?? body?.docs ?? [];
     if (!docs.length) throw new Error("no results");
 
-    // Prefer items actually stocked in this warehouse
     const inStore = docs.filter(d =>
       d.item_location_pricing_listPrice != null &&
       !d.item_program_eligibility?.includes("ShipIt")
     );
     const doc = inStore[0] ?? docs[0];
-
     const price = extractPrice(
-      doc.item_location_pricing_listPrice ??
-      doc.price ??
-      doc.item_sales_price
+      doc.item_location_pricing_listPrice ?? doc.price ?? doc.item_sales_price
     );
-    const name = (doc.name ?? doc.item_name ?? item).slice(0, 80);
-    const unit = doc.item_product_size ?? extractUnit(name);
 
-    return { price, name, unit, found: price != null, inWarehouse: inStore.length > 0, source: "direct" };
+    return {
+      price, found: price != null,
+      name: (doc.name ?? doc.item_name ?? item).slice(0, 80),
+      unit: doc.item_product_size ?? extractUnit(doc.name ?? item),
+      inWarehouse: inStore.length > 0,
+      source: "direct",
+    };
 
   } catch (err) {
-    console.warn(`Costco direct API blocked/failed for "${item}" (${err.message}) — using Apify fallback`);
-    return searchCostcoViaApify(item);
+    console.warn(`Costco direct blocked for "${item}": ${err.message} — trying Apify`);
+    return searchCostcoApify(item);
   }
 }
 
-// ── Costco: Apify fallback when direct API is blocked ────────────────────
-async function searchCostcoViaApify(item) {
-  if (!APIFY_TOKEN) return empty(item, "direct API blocked and no Apify token");
+// ── Costco: Apify fallback ────────────────────────────────────────────────
+async function searchCostcoApify(item) {
+  if (!APIFY_TOKEN) return empty(item, "no Apify token");
   try {
-    const dataset = await runApifyActor(COSTCO_ACTOR, { search: item, maxItems: 3 });
+    const dataset = await runActor(COSTCO_ACTOR, { search: item, maxItems: 3 });
     const first = dataset?.[0];
-    if (!first) return empty(item, "no Apify results");
+    if (!first) return empty(item, "no results from Apify");
 
     const price = extractPrice(first.price ?? first.salePrice ?? first.listing_price);
     return {
       price, found: price != null,
       name: (first.name ?? first.title ?? item).slice(0, 80),
       unit: first.size ?? extractUnit(first.name ?? ""),
-      inWarehouse: null,  // unknown via Apify (online prices)
-      source: "apify_fallback",
+      inWarehouse: null,
+      source: "apify",
     };
   } catch (err) {
-    console.error(`Costco Apify fallback failed: ${err.message}`);
+    console.error(`Costco Apify failed for "${item}": ${err.message}`);
     return empty(item, err.message);
   }
 }
 
-// ── Sam's Club: Apify (online price = in-club price, accurate) ───────────
+// ── Sam's Club: Apify ─────────────────────────────────────────────────────
 async function searchSamsClub(item) {
-  if (!APIFY_TOKEN) return empty(item, "APIFY_TOKEN not set");
+  if (!APIFY_TOKEN) return empty(item, "no Apify token");
   try {
-    const dataset = await runApifyActor(SAMS_ACTOR, {
+    const dataset = await runActor(SAMS_ACTOR, {
       searchKeyword: item,
       club_id: SAMS_CLUB_ID,
       maxItems: 3,
@@ -118,26 +127,36 @@ async function searchSamsClub(item) {
       source: "apify",
     };
   } catch (err) {
-    console.error(`Sam's Club error: ${err.message}`);
+    console.error(`Sam's Club Apify failed for "${item}": ${err.message}`);
     return empty(item, err.message);
   }
 }
 
-// ── Apify helper ──────────────────────────────────────────────────────────
-async function runApifyActor(actorId, input) {
-  const run = await fetch(
-    `${APIFY_BASE}/acts/${actorId}/runs?token=${APIFY_TOKEN}&waitForFinish=90`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) }
+// ── Apify runner — 55s timeout (safely under Railway's 60s limit) ─────────
+async function runActor(actorId, input) {
+  const startRes = await fetch(
+    `${APIFY_BASE}/acts/${actorId}/runs?token=${APIFY_TOKEN}&waitForFinish=55`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+      signal: AbortSignal.timeout(60000),
+    }
   );
-  if (!run.ok) throw new Error(`Actor start failed: ${run.status}`);
-  const { data } = await run.json();
-  const items = await fetch(
-    `${APIFY_BASE}/datasets/${data.defaultDatasetId}/items?token=${APIFY_TOKEN}&format=json&limit=5`
+  if (!startRes.ok) throw new Error(`Apify start failed: ${startRes.status}`);
+
+  const { data } = await startRes.json();
+  if (!data?.defaultDatasetId) throw new Error("No dataset ID from Apify");
+
+  const dataRes = await fetch(
+    `${APIFY_BASE}/datasets/${data.defaultDatasetId}/items?token=${APIFY_TOKEN}&format=json&limit=5`,
+    { signal: AbortSignal.timeout(10000) }
   );
-  return items.ok ? items.json() : [];
+  if (!dataRes.ok) throw new Error(`Apify dataset fetch failed: ${dataRes.status}`);
+  return dataRes.json();
 }
 
-// ── Shared helpers ────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────
 function extractPrice(raw) {
   if (raw == null) return null;
   if (typeof raw === "number" && raw > 0) return raw;
@@ -146,7 +165,7 @@ function extractPrice(raw) {
   return n > 0 ? n : null;
 }
 
-function extractUnit(name) {
+function extractUnit(name = "") {
   const m = name.match(/(\d+[\s\-]?(ct|pk|oz|fl\.?\s*oz|lb|lbs|count|pack|kg|g|L|ml)\b[^,]*)/i);
   return m ? m[0].trim().slice(0, 40) : null;
 }
@@ -156,6 +175,8 @@ function empty(item, reason) {
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────
+app.get("/", (_req, res) => res.json({ status: "ok", message: "Warehouse Price API" }));
+
 app.get("/health", (_req, res) => res.json({
   status: "ok",
   apify_token: !!APIFY_TOKEN,
@@ -169,18 +190,18 @@ app.get("/stores", (_req, res) => res.json({
     warehouse_id: COSTCO_WAREHOUSE,
     name: "Costco Viera West",
     address: "4305 Pineda Causeway, Melbourne FL 32940",
-    note: "Tries Costco's internal API first (true warehouse prices) — falls back to Apify if blocked",
+    note: "Internal API (warehouse prices) with Apify fallback",
   },
   samsclub: {
     club_id: SAMS_CLUB_ID,
     name: "Sam's Club Melbourne",
     address: "4255 W New Haven Ave, Melbourne FL 32904",
-    note: "Online prices via Apify — match in-club prices exactly",
+    note: "Apify — online prices match in-club prices",
   },
 }));
 
 app.post("/compare", async (req, res) => {
-  const { items } = req.body;
+  const { items } = req.body ?? {};
   if (!Array.isArray(items) || !items.length)
     return res.status(400).json({ error: "items must be a non-empty array." });
   if (items.length > 20)
@@ -188,9 +209,12 @@ app.post("/compare", async (req, res) => {
 
   try {
     const rows = await Promise.all(items.map(async (item) => {
-      const [costco, sams] = await Promise.all([searchCostco(item), searchSamsClub(item)]);
-      const cp = costco.price, sp = sams.price;
+      const [costco, sams] = await Promise.all([
+        searchCostco(item),
+        searchSamsClub(item),
+      ]);
 
+      const cp = costco.price, sp = sams.price;
       let winner = "not_found", savings = null;
       if (cp != null && sp != null) {
         if (cp < sp) { winner = "costco"; savings = +(sp - cp).toFixed(2); }
@@ -222,7 +246,8 @@ app.post("/compare", async (req, res) => {
       results: rows,
       stores: { costco: { warehouse_id: COSTCO_WAREHOUSE }, samsclub: { club_id: SAMS_CLUB_ID } },
       summary: {
-        costco_total, samsclub_total,
+        costco_total,
+        samsclub_total,
         costco_wins: rows.filter(r => r.winner === "costco").length,
         samsclub_wins: rows.filter(r => r.winner === "samsclub").length,
         ties: rows.filter(r => r.winner === "tie").length,
@@ -233,15 +258,22 @@ app.post("/compare", async (req, res) => {
         total_savings: +Math.abs(costco_total - samsclub_total).toFixed(2),
       },
     });
+
   } catch (err) {
-    console.error("Compare error:", err);
+    console.error("Compare route error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
+// ── Global error handler — always returns JSON, never HTML ────────────────
+app.use((err, _req, res, _next) => {
+  console.error("Unhandled error:", err);
+  res.status(500).json({ error: err.message ?? "Internal server error" });
+});
+
 app.listen(PORT, () => {
   console.log(`\n Warehouse Price API  →  http://localhost:${PORT}`);
-  console.log(` Apify token:           ${APIFY_TOKEN ? "✓" : "✗ MISSING"}`);
-  console.log(` Costco warehouse:      #${COSTCO_WAREHOUSE}  →  direct API + Apify fallback`);
-  console.log(` Sam's Club:            #${SAMS_CLUB_ID}    →  Apify\n`);
+  console.log(` Apify token:      ${APIFY_TOKEN ? "✓" : "✗ MISSING — set in Railway Variables"}`);
+  console.log(` Costco warehouse: #${COSTCO_WAREHOUSE}`);
+  console.log(` Sam's Club:       #${SAMS_CLUB_ID}\n`);
 });
