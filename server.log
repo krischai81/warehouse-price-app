@@ -1,0 +1,7 @@
+
+ Warehouse Price API  →  http://localhost:3001
+ Apify token:      ✗ MISSING — set in Railway Variables
+ Costco warehouse: #1450
+ Sam's Club:       #8141
+
+Costco direct blocked for "milk": Non-JSON response (404): text/html;charset=UTF-8 — trying Apify

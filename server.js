@@ -88,7 +88,7 @@ async function searchCostco(item) {
 async function searchCostcoApify(item) {
   if (!APIFY_TOKEN) return empty(item, "no Apify token");
   try {
-    const dataset = await runActor(COSTCO_ACTOR, { search: item, maxItems: 3 });
+    const dataset = await runActor(COSTCO_ACTOR, { searchQuery: item, maxItems: 3 });
     const first = dataset?.[0];
     if (!first) return empty(item, "no results from Apify");
 
@@ -111,7 +111,7 @@ async function searchSamsClub(item) {
   if (!APIFY_TOKEN) return empty(item, "no Apify token");
   try {
     const dataset = await runActor(SAMS_ACTOR, {
-      searchKeyword: item,
+      searchUrls: [`https://www.samsclub.com/s/${encodeURIComponent(item)}`],
       club_id: SAMS_CLUB_ID,
       maxItems: 3,
     });
