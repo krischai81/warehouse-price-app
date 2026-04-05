@@ -768,7 +768,7 @@
 
   <script>
     // Replace with your Railway backend URL in production
-    const API = window.API_BASE || "warehouse-price-app-production.up.railway.app";
+    const API = window.API_BASE || "https://warehouse-price-app-production.up.railway.app";
 
     let items = [], activeTab = "text";
 
@@ -893,7 +893,12 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ items: list }),
         });
-        if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+        if (!r.ok) {
+          const txt = await r.text();
+          let errMs = r.statusText;
+          try { errMs = JSON.parse(txt).error || errMs; } catch (e) { errMs = txt.slice(0, 100); }
+          throw new Error(errMs);
+        }
         const d = await r.json();
         renderResults(d.results, d.summary, d.stores);
       } catch (err) {
