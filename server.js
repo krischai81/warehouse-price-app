@@ -1,22 +1,22 @@
 import express from "express";
-import cors    from "cors";
-import dotenv  from "dotenv";
+import cors from "cors";
+import dotenv from "dotenv";
 
 dotenv.config();
 
-const app  = express();
+const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 // ── Config ────────────────────────────────────────────────────────────────
-const APIFY_TOKEN      = process.env.APIFY_TOKEN;
+const APIFY_TOKEN = process.env.APIFY_TOKEN;
 const COSTCO_WAREHOUSE = process.env.COSTCO_WAREHOUSE_ID || "1450"; // Melbourne FL
-const SAMS_CLUB_ID     = process.env.SAMS_CLUB_ID        || "8141"; // Melbourne FL
+const SAMS_CLUB_ID = process.env.SAMS_CLUB_ID || "8141"; // Melbourne FL
 
-const APIFY_BASE  = "https://api.apify.com/v2";
-const SAMS_ACTOR  = "easyapi~sam-s-club-product-scraper";
+const APIFY_BASE = "https://api.apify.com/v2";
+const SAMS_ACTOR = "easyapi~sam-s-club-product-scraper";
 const COSTCO_ACTOR = "parseforge~costco-scraper";
 
 // ── Costco: hit their own internal search API first (free, no key needed) ─
@@ -24,12 +24,12 @@ const COSTCO_ACTOR = "parseforge~costco-scraper";
 // floor prices for that warehouse — not the marked-up online prices.
 async function searchCostco(item) {
   const params = new URLSearchParams({
-    q:      item,
-    whloc:  `${COSTCO_WAREHOUSE}-wh`,
+    q: item,
+    whloc: `${COSTCO_WAREHOUSE}-wh`,
     locale: "en-US",
-    lang:   "en-US",
-    start:  "0",
-    sz:     "5",
+    lang: "en-US",
+    start: "0",
+    sz: "5",
   });
 
   try {
@@ -38,11 +38,11 @@ async function searchCostco(item) {
       {
         signal: AbortSignal.timeout(12000),
         headers: {
-          "User-Agent":      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          "Accept":          "application/json, text/plain, */*",
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          "Accept": "application/json, text/plain, */*",
           "Accept-Language": "en-US,en;q=0.9",
-          "Referer":         "https://www.costco.com/",
-          "Origin":          "https://www.costco.com",
+          "Referer": "https://www.costco.com/",
+          "Origin": "https://www.costco.com",
         },
       }
     );
@@ -61,7 +61,7 @@ async function searchCostco(item) {
 
     const price = extractPrice(
       doc.item_location_pricing_listPrice ??
-      doc.price                           ??
+      doc.price ??
       doc.item_sales_price
     );
     const name = (doc.name ?? doc.item_name ?? item).slice(0, 80);
@@ -80,7 +80,7 @@ async function searchCostcoViaApify(item) {
   if (!APIFY_TOKEN) return empty(item, "direct API blocked and no Apify token");
   try {
     const dataset = await runApifyActor(COSTCO_ACTOR, { search: item, maxItems: 3 });
-    const first   = dataset?.[0];
+    const first = dataset?.[0];
     if (!first) return empty(item, "no Apify results");
 
     const price = extractPrice(first.price ?? first.salePrice ?? first.listing_price);
@@ -103,8 +103,8 @@ async function searchSamsClub(item) {
   try {
     const dataset = await runApifyActor(SAMS_ACTOR, {
       searchKeyword: item,
-      club_id:       SAMS_CLUB_ID,
-      maxItems:      3,
+      club_id: SAMS_CLUB_ID,
+      maxItems: 3,
     });
     const first = dataset?.[0];
     if (!first) return empty(item, "no results");
@@ -157,25 +157,25 @@ function empty(item, reason) {
 
 // ── Routes ────────────────────────────────────────────────────────────────
 app.get("/health", (_req, res) => res.json({
-  status:           "ok",
-  apify_token:      !!APIFY_TOKEN,
+  status: "ok",
+  apify_token: !!APIFY_TOKEN,
   costco_warehouse: COSTCO_WAREHOUSE,
-  sams_club_id:     SAMS_CLUB_ID,
-  timestamp:        new Date().toISOString(),
+  sams_club_id: SAMS_CLUB_ID,
+  timestamp: new Date().toISOString(),
 }));
 
 app.get("/stores", (_req, res) => res.json({
   costco: {
     warehouse_id: COSTCO_WAREHOUSE,
-    name:    "Costco Viera West",
+    name: "Costco Viera West",
     address: "4305 Pineda Causeway, Melbourne FL 32940",
-    note:    "Tries Costco's internal API first (true warehouse prices) — falls back to Apify if blocked",
+    note: "Tries Costco's internal API first (true warehouse prices) — falls back to Apify if blocked",
   },
   samsclub: {
     club_id: SAMS_CLUB_ID,
-    name:    "Sam's Club Melbourne",
+    name: "Sam's Club Melbourne",
     address: "4255 W New Haven Ave, Melbourne FL 32904",
-    note:    "Online prices via Apify — match in-club prices exactly",
+    note: "Online prices via Apify — match in-club prices exactly",
   },
 }));
 
@@ -193,39 +193,39 @@ app.post("/compare", async (req, res) => {
 
       let winner = "not_found", savings = null;
       if (cp != null && sp != null) {
-        if (cp < sp)      { winner = "costco";   savings = +(sp - cp).toFixed(2); }
+        if (cp < sp) { winner = "costco"; savings = +(sp - cp).toFixed(2); }
         else if (sp < cp) { winner = "samsclub"; savings = +(cp - sp).toFixed(2); }
-        else              { winner = "tie";      savings = 0; }
+        else { winner = "tie"; savings = 0; }
       } else if (cp != null) { winner = "costco_only"; }
-        else if (sp != null) { winner = "samsclub_only"; }
+      else if (sp != null) { winner = "samsclub_only"; }
 
       return {
         item,
-        costco_price:        cp,
-        costco_name:         costco.name,
-        costco_unit:         costco.unit,
+        costco_price: cp,
+        costco_name: costco.name,
+        costco_unit: costco.unit,
         costco_in_warehouse: costco.inWarehouse,
-        costco_source:       costco.source,
-        samsclub_price:      sp,
-        samsclub_name:       sams.name,
-        samsclub_unit:       sams.unit,
+        costco_source: costco.source,
+        samsclub_price: sp,
+        samsclub_name: sams.name,
+        samsclub_unit: sams.unit,
         winner,
         savings,
       };
     }));
 
-    const comparable     = rows.filter(r => r.costco_price != null && r.samsclub_price != null);
-    const costco_total   = +rows.reduce((s, r) => s + (r.costco_price   ?? 0), 0).toFixed(2);
+    const comparable = rows.filter(r => r.costco_price != null && r.samsclub_price != null);
+    const costco_total = +rows.reduce((s, r) => s + (r.costco_price ?? 0), 0).toFixed(2);
     const samsclub_total = +rows.reduce((s, r) => s + (r.samsclub_price ?? 0), 0).toFixed(2);
 
     res.json({
       results: rows,
-      stores:  { costco: { warehouse_id: COSTCO_WAREHOUSE }, samsclub: { club_id: SAMS_CLUB_ID } },
+      stores: { costco: { warehouse_id: COSTCO_WAREHOUSE }, samsclub: { club_id: SAMS_CLUB_ID } },
       summary: {
         costco_total, samsclub_total,
-        costco_wins:    rows.filter(r => r.winner === "costco").length,
-        samsclub_wins:  rows.filter(r => r.winner === "samsclub").length,
-        ties:           rows.filter(r => r.winner === "tie").length,
+        costco_wins: rows.filter(r => r.winner === "costco").length,
+        samsclub_wins: rows.filter(r => r.winner === "samsclub").length,
+        ties: rows.filter(r => r.winner === "tie").length,
         items_compared: comparable.length,
         overall_winner: costco_total > 0 && samsclub_total > 0
           ? (costco_total <= samsclub_total ? "costco" : "samsclub")
